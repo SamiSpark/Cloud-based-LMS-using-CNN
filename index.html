@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Library Book Scanner</title>
+    
+    <!-- Firebase -->
+    <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-firestore.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-auth.js"></script>
+    
+    <!-- TensorFlow.js -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js"></script>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        #cameraContainer {
+            position: relative;
+            width: 100%;
+            max-width: 500px;
+            margin: 20px auto;
+        }
+        #video {
+            width: 100%;
+            display: none;
+            border: 2px solid #4CAF50;
+            border-radius: 5px;
+        }
+        #canvas {
+            display: none;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            margin: 5px 0;
+            border-radius: 4px;
+            cursor: pointer;
+            width: 100%;
+        }
+        button:disabled {
+            background-color: #cccccc;
+        }
+        #status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+        }
+        .loading {
+            background-color: #fff3cd;
+        }
+        .ready {
+            background-color: #d4edda;
+        }
+        .error {
+            background-color: #f8d7da;
+        }
+        #predictionResult {
+            margin-top: 20px;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        #debugInfo {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #f0f0f0;
+            border-radius: 5px;
+            font-family: monospace;
+            white-space: pre-wrap;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        input {
+            width: 100%;
+            padding: 10px;
+            margin: 8px 0;
+            box-sizing: border-box;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Library Book Scanner</h1>
+    
+    <div id="status" class="loading">Loading book recognition model...</div>
+    
+    <div id="cameraContainer">
+        <video id="video" autoplay playsinline></video>
+        <canvas id="canvas"></canvas>
+    </div>
+    
+    <button id="startCameraBtn" disabled>Start Camera</button>
+    <button id="captureBtn" disabled>Capture Book</button>
+    <button id="scanBtn" disabled>Scan Book</button>
+    
+    <div id="predictionResult" style="display: none;">
+        <h3>Scan Results</h3>
+        <p id="predictionText">Analyzing book...</p>
+        <img id="previewImage" style="max-width: 200px; display: none;">
+    </div>
+
+    <div id="debugInfo"></div>
+
+    <h2>Sign Up</h2>
+    <form id="signUpForm">
+        <input type="email" id="email" placeholder="Email" required>
+        <input type="password" id="password" placeholder="Password" required>
+        <button type="submit">Sign Up</button>
+    </form>
+
+    <h2>Sign In</h2>
+    <form id="signInForm">
+        <input type="email" id="signInEmail" placeholder="Email" required>
+        <input type="password" id="signInPassword" placeholder="Password" required>
+        <button type="submit">Sign In</button>
+    </form>
+
+    <script>
+        // Debugging with timestamps
+        function debugLog(message) {
+            const now = new Date();
+            const timestamp = now.toTimeString().split(' ')[0];
+            const debugDiv = document.getElementById('debugInfo');
+            debugDiv.innerHTML += `[${timestamp}] ${message}\n`;
+            debugDiv.scrollTop = debugDiv.scrollHeight;
+            console.log(message);
+        }
+
+        // Initialize Firebase
+        const firebaseConfig = {
+            apiKey: "AIzaSyDbWEV_KzPZJGwaV6UyIL-FkCdamM-lfL8",
+            authDomain: "cloud-based-lms-using-cnn.firebaseapp.com",
+            projectId: "cloud-based-lms-using-cnn",
+            storageBucket: "cloud-based-lms-using-cnn.appspot.com",
+            messagingSenderId: "1069273203241",
+            appId: "1:1069273203241:web:f66a6634cf735e38911238"
+        };
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+        const auth = firebase.auth();
+
+        // DOM elements
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        let currentImageData = null;
+
+        // Model configuration
+        const CLASS_NAMES = [
+            'History-Archaeology',
+            'Mind-Body-Spirit',
+            'Teaching-Resources-Education',
+            'Home-Garden',
+            'Science-Geography'
+        ];
+        const INPUT_SHAPE = [299, 299, 3];
+        let model = null;
+
+        // Status updates
+        function updateStatus(status, message) {
+            const emoji = {
+                loading: '⏳',
+                ready: '✅',
+                error: '❌'
+            }[status] || '';
+            document.getElementById('status').className = status;
+            document.getElementById('status').textContent = `${emoji} ${message}`;
+            debugLog(`STATUS: ${status.toUpperCase()} - ${message}`);
+        }
+
+        // Verify model files exist
+        async function verifyModelFiles() {
+            try {
+                debugLog('Verifying model files...');
+                const modelResponse = await fetch('model.json');
+                if (!modelResponse.ok) throw new Error('model.json not found');
+                
+                const weightResponse = await fetch('group1-shard1of53.bin');
+                if (!weightResponse.ok) throw new Error('Weight files not found');
+                
+                debugLog('All model files verified');
+                return true;
+            } catch (error) {
+                debugLog(`FILE VERIFICATION FAILED: ${error.message}`);
+                throw new Error(`Model files missing. Ensure:
+1. model.json exists
+2. All weight files (group1-shard*.bin) exist
+3. Files are in the same directory as this HTML file`);
+            }
+        }
+
+        // Load model with progress tracking
+        async function loadModel() {
+            try {
+                await verifyModelFiles();
+                
+                updateStatus('loading', 'Loading model (0%)');
+                let lastProgress = 0;
+                
+                const progressCallback = (fraction) => {
+                    const percent = Math.floor(fraction * 100);
+                    if (percent > lastProgress) {
+                        lastProgress = percent;
+                        updateStatus('loading', `Loading model (${percent}%)`);
+                    }
+                };
+                
+                // Try GraphModel first
+                try {
+                    debugLog('Attempting to load as GraphModel...');
+                    model = await tf.loadGraphModel('model.json', { onProgress: progressCallback });
+                    debugLog('GraphModel loaded successfully');
+                    return model;
+                } catch (graphError) {
+                    debugLog(`GraphModel failed: ${graphError.message}`);
+                }
+                
+                // Then try LayersModel
+                try {
+                    debugLog('Attempting to load as LayersModel...');
+                    model = await tf.loadLayersModel('model.json', { onProgress: progressCallback });
+                    debugLog('LayersModel loaded successfully');
+                    return model;
+                } catch (layersError) {
+                    debugLog(`LayersModel failed: ${layersError.message}`);
+                }
+                
+                throw new Error('All loading methods failed');
+            } catch (error) {
+                debugLog(`MODEL LOADING FAILED: ${error.message}`);
+                throw new Error(`Model loading failed. Please ensure:
+1. You're using a web server (http://localhost)
+2. All model files are in the correct location
+3. Model matches TFJS version 3.18.0`);
+            }
+        }
+
+        // Camera functions
+        async function startCamera() {
+            try {
+                debugLog('Starting camera...');
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        facingMode: 'environment',
+                        width: { ideal: INPUT_SHAPE[0] },
+                        height: { ideal: INPUT_SHAPE[1] }
+                    }
+                });
+                video.srcObject = stream;
+                video.style.display = 'block';
+                await video.play();
+                document.getElementById('captureBtn').disabled = false;
+                document.getElementById('scanBtn').disabled = false;
+                debugLog('Camera started successfully');
+                return true;
+            } catch (error) {
+                debugLog(`Camera error: ${error.message}`);
+                updateStatus('error', `Camera error: ${error.message}`);
+                return false;
+            }
+        }
+
+        function stopCamera() {
+            if (video.srcObject) {
+                video.srcObject.getTracks().forEach(track => track.stop());
+                video.srcObject = null;
+                video.style.display = 'none';
+                debugLog('Camera stopped');
+            }
+        }
+
+        async function captureImage() {
+            const context = canvas.getContext('2d');
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+            
+            if (canvas.width !== INPUT_SHAPE[0] || canvas.height !== INPUT_SHAPE[1]) {
+                const resizedCanvas = document.createElement('canvas');
+                resizedCanvas.width = INPUT_SHAPE[0];
+                resizedCanvas.height = INPUT_SHAPE[1];
+                const resizedContext = resizedCanvas.getContext('2d');
+                resizedContext.drawImage(canvas, 0, 0, INPUT_SHAPE[0], INPUT_SHAPE[1]);
+                currentImageData = resizedCanvas.toDataURL('image/jpeg');
+                debugLog(`Image resized to ${INPUT_SHAPE[0]}x${INPUT_SHAPE[1]}`);
+                return resizedCanvas;
+            }
+            
+            currentImageData = canvas.toDataURL('image/jpeg');
+            debugLog(`Image captured at ${canvas.width}x${canvas.height}`);
+            return canvas;
+        }
+
+        async function predictBook(imageElement) {
+            try {
+                updateStatus('loading', 'Recognizing book...');
+                document.getElementById('predictionResult').style.display = 'block';
+                document.getElementById('predictionText').textContent = "Analyzing book cover...";
+                document.getElementById('previewImage').src = currentImageData;
+                document.getElementById('previewImage').style.display = 'block';
+                
+                debugLog('Preprocessing image...');
+                const tensor = tf.tidy(() => {
+                    return tf.browser.fromPixels(imageElement)
+                        .resizeNearestNeighbor([INPUT_SHAPE[0], INPUT_SHAPE[1]])
+                        .toFloat()
+                        .div(255.0)
+                        .expandDims();
+                });
+                
+                debugLog('Making prediction...');
+                const prediction = await model.predict(tensor);
+                const predictedClass = prediction.argMax(1).dataSync()[0];
+                const confidence = prediction.max().dataSync()[0];
+                
+                tensor.dispose();
+                prediction.dispose();
+                
+                debugLog(`Prediction: ${CLASS_NAMES[predictedClass]} (${(confidence * 100).toFixed(2)}% confidence)`);
+                
+                return {
+                    className: CLASS_NAMES[predictedClass],
+                    confidence: (confidence * 100).toFixed(2) + '%'
+                };
+            } catch (error) {
+                debugLog(`Prediction error: ${error.message}`);
+                updateStatus('error', `Prediction failed: ${error.message}`);
+                return null;
+            }
+        }
+
+        // Firebase functions
+        async function addBook(title, author, genre, imageData) {
+            try {
+                debugLog(`Adding book: ${title}`);
+                await db.collection('books').add({
+                    title: title,
+                    author: author,
+                    genre: genre,
+                    image: imageData,
+                    timestamp: firebase.firestore.FieldValue.serverTimestamp()
+                });
+                updateStatus('ready', `Book "${title}" added successfully!`);
+                return true;
+            } catch (error) {
+                debugLog(`Error adding book: ${error.message}`);
+                updateStatus('error', `Failed to save book: ${error.message}`);
+                return false;
+            }
+        }
+
+        async function signUp(email, password) {
+            try {
+                debugLog(`Signing up user: ${email}`);
+                await auth.createUserWithEmailAndPassword(email, password);
+                updateStatus('ready', `User ${email} signed up successfully`);
+            } catch (error) {
+                debugLog(`Sign up error: ${error.message}`);
+                updateStatus('error', `Sign up failed: ${error.message}`);
+            }
+        }
+
+        async function signIn(email, password) {
+            try {
+                debugLog(`Signing in user: ${email}`);
+                await auth.signInWithEmailAndPassword(email, password);
+                updateStatus('ready', `User ${email} signed in successfully`);
+            } catch (error) {
+                debugLog(`Sign in error: ${error.message}`);
+                updateStatus('error', `Sign in failed: ${error.message}`);
+            }
+        }
+
+        // Event listeners
+        document.getElementById('startCameraBtn').addEventListener('click', async () => {
+            const success = await startCamera();
+            if (success) {
+                updateStatus('ready', 'Camera ready. Point at a book cover.');
+            }
+        });
+
+        document.getElementById('captureBtn').addEventListener('click', async () => {
+            const imageElement = await captureImage();
+            const result = await predictBook(imageElement);
+            
+            if (result) {
+                document.getElementById('predictionText').innerHTML = `
+                    <strong>Category:</strong> ${result.className}<br>
+                    <strong>Confidence:</strong> ${result.confidence}
+                `;
+                updateStatus('ready', 'Scan complete!');
+            }
+        });
+
+        document.getElementById('scanBtn').addEventListener('click', async () => {
+            const imageElement = await captureImage();
+            const result = await predictBook(imageElement);
+            
+            if (result) {
+                const bookTitle = prompt("Enter book title:", result.className);
+                if (bookTitle) {
+                    await addBook(bookTitle, "", result.className, currentImageData);
+                }
+            }
+        });
+
+        document.getElementById('signUpForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+            signUp(email, password);
+        });
+
+        document.getElementById('signInForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const email = document.getElementById('signInEmail').value;
+            const password = document.getElementById('signInPassword').value;
+            signIn(email, password);
+        });
+
+        // Initialize application
+        (async function init() {
+            try {
+                debugLog('Initializing application...');
+                
+                // Load model and enable UI
+                model = await loadModel();
+                document.getElementById('startCameraBtn').disabled = false;
+                updateStatus('ready', 'Model loaded! Click "Start Camera" to begin');
+                
+                debugLog('Application initialized successfully');
+            } catch (error) {
+                debugLog(`INITIALIZATION FAILED: ${error.message}`);
+                updateStatus('error', error.message);
+                
+                // Show troubleshooting help
+                const debugDiv = document.getElementById('debugInfo');
+                debugDiv.innerHTML += `\nTROUBLESHOOTING HELP:
+1. Are you running via http://localhost? (not file://)
+2. Check all model files are in the same folder:
+   - model.json
+   - group1-shard1of53.bin
+   - group1-shard2of53.bin
+   - ... (all 53 shards)
+3. Check browser console (F12) for network errors
+4. Model must match TFJS version 3.18.0`;
+            }
+        })();
+    </script>
+</body>
+</html>
